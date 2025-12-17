@@ -233,6 +233,12 @@ function App() {
               🖥️ 完整界面
             </button>
             <button
+              onClick={() => changeViewMode('translator')}
+              className="px-4 py-2 rounded-xl text-sm font-medium transition-all text-gray-400 hover:text-white"
+            >
+              🎤 纯翻译
+            </button>
+            <button
               onClick={() => changeViewMode('floating')}
               className="px-4 py-2 rounded-xl text-sm font-medium transition-all text-gray-400 hover:text-white"
             >

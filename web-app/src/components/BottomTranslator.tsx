@@ -46,7 +46,7 @@ const TRANSLATION_APIS: { code: TranslationAPI; name: string }[] = [
 ];
 
 export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTranslatorProps) {
-  const [sourceLanguage, setSourceLanguage] = useState(''); // 空字符串表示自动识别
+  const [sourceLanguage, setSourceLanguage] = useState('zh-CN'); // 默认简体中文，可在设置中改为自动识别
   const [targetLanguage, setTargetLanguage] = useState('zh-CN');
   const [apiType, setApiType] = useState<TranslationAPI>('google');
   const [activeTab, setActiveTab] = useState<'home' | 'history' | 'settings'>('home');
@@ -83,6 +83,20 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
   useEffect(() => {
     console.log('[BottomTranslator] isListening:', isListening, 'sourceLanguage:', sourceLanguage || 'auto');
   }, [isListening, sourceLanguage]);
+
+  // 当源语言改变时，如果正在监听，则重启语音识别
+  const prevSourceLanguageRef = useRef(sourceLanguage);
+  useEffect(() => {
+    if (prevSourceLanguageRef.current !== sourceLanguage && isListening) {
+      console.log('[BottomTranslator] Source language changed, restarting recognition...');
+      stopListening();
+      // 短暂延迟后重新开始
+      setTimeout(() => {
+        startListening();
+      }, 100);
+    }
+    prevSourceLanguageRef.current = sourceLanguage;
+  }, [sourceLanguage, isListening, stopListening, startListening]);
 
   const {
     translatedText,
