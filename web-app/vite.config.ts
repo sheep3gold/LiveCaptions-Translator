@@ -7,7 +7,7 @@ export default defineConfig({
     port: 3020,
     strictPort: true,  // 如果端口被占用则报错，不自动切换
     host: '0.0.0.0',   // 允许外部访问
-    allowedHosts: ['caishi-a.hsk.top', 'localhost', '127.0.0.1'],  // 允许的域名
+    allowedHosts: true,  // 允许所有域名访问
     proxy: {
       '/api': {
         target: 'http://localhost:3020',
