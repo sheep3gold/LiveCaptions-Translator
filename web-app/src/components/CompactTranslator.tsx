@@ -29,7 +29,7 @@ const TARGET_LANGUAGES = [
 
 export function CompactTranslator({ onContextChange, onHistoryChange }: CompactTranslatorProps) {
   const [sourceLanguage, setSourceLanguage] = useState('en-US');
-  const [targetLanguage, setTargetLanguage] = useState('zh-CN');
+  const [targetLanguage, setTargetLanguage] = useState('en-US'); // 默认翻译成英文
   const [apiType] = useState<TranslationAPI>('google');
   const [activeTab, setActiveTab] = useState<'home' | 'history' | 'log'>('home');
   const [history, setHistory] = useState<TranslationEntry[]>([]);

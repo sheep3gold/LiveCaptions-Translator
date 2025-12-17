@@ -10,7 +10,7 @@ export default defineConfig({
     allowedHosts: true,  // 允许所有域名访问
     proxy: {
       '/api': {
-        target: 'http://localhost:3020',
+        target: 'http://localhost:3021',  // 开发时后端端口
         changeOrigin: true
       }
     }

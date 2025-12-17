@@ -3,10 +3,12 @@ import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import { useTranslation, TranslationAPI } from '../hooks/useTranslation';
 
 interface TranslationEntry {
+  id: number;
   source: string;
   translated: string;
   time: Date;
   api: string;
+  savedAt?: string; // 服务器保存时间
 }
 
 interface BottomTranslatorProps {
@@ -47,22 +49,104 @@ const TRANSLATION_APIS: { code: TranslationAPI; name: string }[] = [
 
 export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTranslatorProps) {
   const [sourceLanguage, setSourceLanguage] = useState('zh-CN'); // 默认简体中文，可在设置中改为自动识别
-  const [targetLanguage, setTargetLanguage] = useState('zh-CN');
+  const [targetLanguage, setTargetLanguage] = useState('en-US'); // 默认翻译成英文
   const [apiType, setApiType] = useState<TranslationAPI>('google');
   const [activeTab, setActiveTab] = useState<'home' | 'history' | 'settings'>('home');
   const [history, setHistory] = useState<TranslationEntry[]>([]);
+  const [persistedHistory, setPersistedHistory] = useState<TranslationEntry[]>([]); // 服务器保存的历史
   const [isDarkTheme, setIsDarkTheme] = useState(false);
   const [apiKey, setApiKey] = useState('');
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historySaving, setHistorySaving] = useState(false);
+  const [isTranslationPaused, setIsTranslationPaused] = useState(false); // 暂停翻译（但继续语音识别）
   
   // 历史记录相关状态
   const [historyPage, setHistoryPage] = useState(1);
   const [historySearch, setHistorySearch] = useState('');
   const [historyPageSize] = useState(30);
   const [showSessionHistory, setShowSessionHistory] = useState(false); // 显示当前会话记录
+  const [availableDates, setAvailableDates] = useState<string[]>([]); // 可用的历史日期
+  const [selectedDate, setSelectedDate] = useState<string>(''); // 选中的日期（空表示全部）
   
   const lastTranslatedTextRef = useRef('');
   const translationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTogglingRef = useRef(false); // 防止快速双击
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  
+  // 使用 ref 跟踪上一个 transcript 和对应的翻译
+  const prevTranscriptRef = useRef('');
+  const pendingEntryRef = useRef<TranslationEntry | null>(null); // 待保存的条目
+
+  // 加载持久化的历史记录（支持按日期筛选）
+  const loadHistory = useCallback(async (date?: string) => {
+    setHistoryLoading(true);
+    try {
+      const url = date ? `/api/history?date=${date}` : '/api/history?days=30';
+      const response = await fetch(url);
+      const data = await response.json();
+      if (data.success) {
+        if (data.history) {
+          const parsed = data.history.map((h: TranslationEntry) => ({
+            ...h,
+            time: new Date(h.time)
+          }));
+          setPersistedHistory(parsed);
+          console.log('[History] Loaded', parsed.length, 'entries from server');
+        }
+        if (data.dates) {
+          setAvailableDates(data.dates);
+        }
+      }
+    } catch (error) {
+      console.error('[History] Failed to load:', error);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
+  // 保存单条历史记录到服务器
+  const saveHistoryEntry = useCallback(async (entry: TranslationEntry) => {
+    try {
+      const response = await fetch('/api/history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          entry: {
+            ...entry,
+            time: entry.time.toISOString()
+          }
+        })
+      });
+      const data = await response.json();
+      if (data.success) {
+        console.log('[History] Saved entry, total:', data.count);
+      }
+    } catch (error) {
+      console.error('[History] Failed to save entry:', error);
+    }
+  }, []);
+
+  // 清空服务器历史记录
+  const clearPersistedHistory = useCallback(async () => {
+    setHistorySaving(true);
+    try {
+      const response = await fetch('/api/history', { method: 'DELETE' });
+      const data = await response.json();
+      if (data.success) {
+        setPersistedHistory([]);
+        console.log('[History] Cleared all entries');
+      }
+    } catch (error) {
+      console.error('[History] Failed to clear:', error);
+    } finally {
+      setHistorySaving(false);
+    }
+  }, []);
+
+  // 组件挂载时加载历史记录
+  useEffect(() => {
+    loadHistory();
+  }, [loadHistory]);
 
   const {
     isListening,
@@ -110,6 +194,9 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
   });
 
   useEffect(() => {
+    // 如果暂停翻译，则不执行翻译（但语音识别继续）
+    if (isTranslationPaused) return;
+    
     const textToTranslate = transcript + interimTranscript;
     
     if (!textToTranslate.trim()) return;
@@ -129,27 +216,58 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
         clearTimeout(translationTimeoutRef.current);
       }
     };
-  }, [transcript, interimTranscript, translate]);
+  }, [transcript, interimTranscript, translate, isTranslationPaused]);
 
+  // 当 transcript 变化时，检测是否是新的一句话
   useEffect(() => {
-    if (transcript && translatedText && !isTranslating) {
-      const lastEntry = history[0];
-      if (!lastEntry || lastEntry.source !== transcript) {
-        const apiName = TRANSLATION_APIS.find(a => a.code === apiType)?.name || apiType;
-        const newHistory = [{
-          source: transcript,
-          translated: translatedText,
-          time: new Date(),
-          api: apiName,
-        }, ...history].slice(0, 100);
-        setHistory(newHistory);
-        onHistoryChange?.(newHistory);
+    // 如果 transcript 变化了，说明新的一句话开始了
+    if (transcript && transcript !== prevTranscriptRef.current) {
+      console.log('[BottomTranslator] New sentence detected:', transcript.slice(0, 20) + '...');
+      
+      // 如果有待保存的条目（上一句话），立即保存到历史
+      if (pendingEntryRef.current) {
+        console.log('[BottomTranslator] Saving previous sentence to history:', pendingEntryRef.current.source.slice(0, 20) + '...');
+        
+        const entryToSave = pendingEntryRef.current;
+        
+        // 立即更新前端缓存（history state）
+        setHistory(prev => {
+          const newHistory = [entryToSave, ...prev].slice(0, 100);
+          onHistoryChange?.(newHistory);
+          return newHistory;
+        });
+        
+        // 异步保存到服务器（不阻塞UI）
+        saveHistoryEntry(entryToSave);
+        
+        // 清空待保存条目
+        pendingEntryRef.current = null;
       }
+      
+      // 更新 prevTranscriptRef
+      prevTranscriptRef.current = transcript;
+    }
+  }, [transcript, onHistoryChange, saveHistoryEntry]);
+
+  // 当翻译完成时，创建待保存的条目
+  useEffect(() => {
+    if (transcript && translatedText && !isTranslating && !isTranslationPaused) {
+      console.log('[BottomTranslator] Translation complete, creating pending entry');
+      
+      // 创建待保存条目（等下一句话来时保存）
+      const apiName = TRANSLATION_APIS.find(a => a.code === apiType)?.name || apiType;
+      pendingEntryRef.current = {
+        id: Date.now(),
+        source: transcript,
+        translated: translatedText,
+        time: new Date(),
+        api: apiName,
+      };
       
       const contextText = `原文：${transcript}\n翻译：${translatedText}`;
       onContextChange?.(contextText);
     }
-  }, [transcript, translatedText, isTranslating, history, onContextChange, onHistoryChange, apiType]);
+  }, [transcript, translatedText, isTranslating, isTranslationPaused, apiType, onContextChange]);
 
   const handleToggleListening = useCallback(() => {
     // 防止快速双击
@@ -168,19 +286,63 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
     
     if (isListening) {
       console.log('[BottomTranslator] Stopping...');
+      
+      // 停止时，保存当前句子到历史记录
+      // 优先使用 pendingEntryRef（已翻译完成的），否则用当前显示的内容
+      const entryToSave = pendingEntryRef.current || 
+        (transcript && translatedText ? {
+          id: Date.now(),
+          source: transcript,
+          translated: translatedText,
+          time: new Date(),
+          api: TRANSLATION_APIS.find(a => a.code === apiType)?.name || apiType,
+        } as TranslationEntry : null);
+      
+      if (entryToSave) {
+        // 检查是否已经保存过
+        setHistory(prev => {
+          const alreadySaved = prev.length > 0 && prev[0].source === entryToSave.source;
+          if (alreadySaved) {
+            return prev;
+          }
+          const newHistory = [entryToSave, ...prev].slice(0, 100);
+          onHistoryChange?.(newHistory);
+          // 异步保存到服务器
+          saveHistoryEntry(entryToSave);
+          return newHistory;
+        });
+      }
+      
+      // 清空 refs
+      pendingEntryRef.current = null;
+      prevTranscriptRef.current = '';
+      
       stopListening();
-    } else {
-      console.log('[BottomTranslator] Starting...');
+      
+      // 停止后清空翻译面板
       resetTranscript();
       clearTranslation();
       lastTranslatedTextRef.current = '';
+    } else {
+      console.log('[BottomTranslator] Starting new session...');
+      
+      // 清空当前会话历史（开始新的录制会话）
+      // 之前的记录已经保存在服务器/左侧历史中
+      setHistory([]);
+      onHistoryChange?.([]);
+      
+      resetTranscript();
+      clearTranslation();
+      lastTranslatedTextRef.current = '';
+      pendingEntryRef.current = null;
+      prevTranscriptRef.current = '';
       startListening();
     }
-  }, [isListening, startListening, stopListening, resetTranscript, clearTranslation]);
+  }, [isListening, startListening, stopListening, resetTranscript, clearTranslation, transcript, translatedText, history, apiType, onHistoryChange, saveHistoryEntry]);
 
   const displayText = transcript + (interimTranscript ? ` ${interimTranscript}` : '');
 
-  // 过滤和分页历史记录
+  // 过滤和分页历史记录（当前会话）
   const filteredHistory = history.filter(item => 
     historySearch === '' || 
     item.source.toLowerCase().includes(historySearch.toLowerCase()) ||
@@ -188,6 +350,18 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
   );
   
   const paginatedHistory = filteredHistory.slice(
+    (historyPage - 1) * historyPageSize,
+    historyPage * historyPageSize
+  );
+
+  // 根据标签切换显示的历史记录（当前会话 或 所有历史）
+  const displayedHistory = (showSessionHistory ? history : persistedHistory).filter(item => 
+    historySearch === '' || 
+    item.source.toLowerCase().includes(historySearch.toLowerCase()) ||
+    item.translated.toLowerCase().includes(historySearch.toLowerCase())
+  );
+  
+  const paginatedDisplayedHistory = displayedHistory.slice(
     (historyPage - 1) * historyPageSize,
     historyPage * historyPageSize
   );
@@ -268,7 +442,37 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
 
           {/* 右侧：控制按钮组 */}
           <div className="flex items-center gap-1">
-            {/* 历史记录按钮 */}
+            {/* 1. REC 按钮：开始/停止录制（语音识别） */}
+            <button
+              onClick={handleToggleListening}
+              className={`p-2 rounded-lg transition-colors flex items-center gap-1 ${
+                isListening 
+                  ? 'bg-red-100 text-red-600 hover:bg-red-200' 
+                  : `${isDarkTheme ? 'hover:bg-gray-700' : 'hover:bg-gray-100'} ${iconColor}`
+              }`}
+              title={isListening ? '停止录制' : '开始录制'}
+              disabled={!isSupported}
+            >
+              {isListening ? (
+                <>
+                  {/* 停止图标 */}
+                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <rect x="6" y="6" width="12" height="12" rx="2" />
+                  </svg>
+                  <span className="text-xs font-medium">STOP</span>
+                </>
+              ) : (
+                <>
+                  {/* REC 图标 */}
+                  <svg className="w-5 h-5" viewBox="0 0 24 24">
+                    <circle cx="12" cy="12" r="8" fill="currentColor" />
+                  </svg>
+                  <span className="text-xs font-medium">REC</span>
+                </>
+              )}
+            </button>
+
+            {/* 2. 历史记录按钮 */}
             <button
               onClick={() => setShowSessionHistory(!showSessionHistory)}
               className={`p-2 rounded-lg transition-colors ${
@@ -283,63 +487,37 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
               </svg>
             </button>
 
-            {/* 主题切换 */}
+            {/* 3. 暂停翻译按钮：暂停翻译但继续语音识别 */}
             <button
-              onClick={() => setIsDarkTheme(!isDarkTheme)}
-              className={`p-2 rounded-lg transition-colors ${isDarkTheme ? 'hover:bg-gray-700' : 'hover:bg-gray-100'} ${iconColor}`}
-              title={isDarkTheme ? '切换到亮色主题' : '切换到暗色主题'}
+              onClick={() => setIsTranslationPaused(!isTranslationPaused)}
+              disabled={!isListening}
+              className={`p-2 rounded-lg transition-colors ${
+                isTranslationPaused 
+                  ? 'bg-yellow-100 text-yellow-600 hover:bg-yellow-200' 
+                  : `${isDarkTheme ? 'hover:bg-gray-700' : 'hover:bg-gray-100'} ${!isListening ? 'opacity-40 cursor-not-allowed' : ''} ${iconColor}`
+              }`}
+              title={isTranslationPaused ? '恢复翻译' : '暂停翻译（继续识别原文）'}
             >
-              {isDarkTheme ? (
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+              {isTranslationPaused ? (
+                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M8 5v14l11-7z" />
                 </svg>
               ) : (
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-                </svg>
-              )}
-            </button>
-
-            {/* 开始/暂停翻译 */}
-            <button
-              onClick={handleToggleListening}
-              className={`p-2 rounded-lg transition-colors ${
-                isListening 
-                  ? 'bg-red-100 text-red-600 hover:bg-red-200' 
-                  : `${isDarkTheme ? 'hover:bg-gray-700' : 'hover:bg-gray-100'} ${iconColor}`
-              }`}
-              title={isListening ? '暂停翻译' : '开始翻译'}
-              disabled={!isSupported}
-            >
-              {isListening ? (
                 <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
                   <rect x="6" y="4" width="4" height="16" rx="1" />
                   <rect x="14" y="4" width="4" height="16" rx="1" />
                 </svg>
-              ) : (
-                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M8 5v14l11-7z" />
-                </svg>
               )}
             </button>
 
-            {/* 窗口模式 */}
+            {/* 4. 悬浮字幕框 */}
             <button
+              onClick={() => window.open('#floating', '_blank')}
               className={`p-2 rounded-lg transition-colors ${isDarkTheme ? 'hover:bg-gray-700' : 'hover:bg-gray-100'} ${iconColor}`}
-              title="窗口模式"
+              title="打开悬浮字幕框"
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
-              </svg>
-            </button>
-
-            {/* 置顶 */}
-            <button
-              className={`p-2 rounded-lg transition-colors ${isDarkTheme ? 'hover:bg-gray-700' : 'hover:bg-gray-100'} ${iconColor}`}
-              title="置顶"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z" />
               </svg>
             </button>
 
@@ -379,17 +557,51 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
                     border: isDarkTheme ? '1px solid rgba(255,255,255,0.1)' : '1px solid rgba(0,0,0,0.1)'
                   }}
                 >
-                  {history.length === 0 ? (
+                  {/* 当前正在进行的翻译（实时显示在顶部） */}
+                  {displayText && (
+                    <div className={`px-5 py-3 ${history.length > 0 ? (isDarkTheme ? 'border-b border-gray-700' : 'border-b border-gray-200/50') : ''}`}>
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className={`text-xs px-1.5 py-0.5 rounded ${isListening ? 'bg-red-100 text-red-600 animate-pulse' : 'bg-gray-100 text-gray-500'}`}>
+                          {isListening ? '录制中' : '当前'}
+                        </span>
+                      </div>
+                      <p 
+                        className="text-sm leading-relaxed mb-2"
+                        style={{ 
+                          fontFamily: '"PingFang SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+                          fontWeight: 400,
+                          color: isDarkTheme ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.6)'
+                        }}
+                      >
+                        {displayText}
+                      </p>
+                      <p 
+                        className="text-base leading-relaxed"
+                        style={{ 
+                          fontFamily: '"PingFang SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+                          fontWeight: 500,
+                          color: isDarkTheme ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.9)'
+                        }}
+                      >
+                        {isTranslationPaused 
+                          ? '⏸ 翻译已暂停' 
+                          : (translatedText || (isTranslating ? '翻译中...' : ''))}
+                      </p>
+                    </div>
+                  )}
+                  
+                  {/* 已完成的历史记录 */}
+                  {history.length === 0 && !displayText ? (
                     <div className="flex items-center justify-center h-[152px]">
                       <p className={`text-sm ${isDarkTheme ? 'text-gray-500' : 'text-gray-400'}`}>
-                        暂无历史记录
+                        暂无历史记录，点击 REC 开始录制
                       </p>
                     </div>
                   ) : (
-                    <div className="max-h-[300px] overflow-auto">
+                    <div className="max-h-[250px] overflow-auto">
                       {history.map((item, index) => (
                         <div 
-                          key={index}
+                          key={item.id || index}
                           className={`px-5 py-3 ${index < history.length - 1 ? (isDarkTheme ? 'border-b border-gray-700' : 'border-b border-gray-200/50') : ''}`}
                         >
                           {/* 原文 - 小字体 */}
@@ -480,7 +692,9 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
                       color: isDarkTheme ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.9)'
                     }}
                   >
-                    {translatedText || (isTranslating ? '翻译中...' : '翻译结果将显示在这里')}
+                    {isTranslationPaused 
+                      ? '⏸ 翻译已暂停（原文继续识别中...）' 
+                      : (translatedText || (isTranslating ? '翻译中...' : '翻译结果将显示在这里'))}
                   </p>
                 </div>
               </div>
@@ -490,7 +704,79 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
 
           {activeTab === 'history' && (
             <div className="p-4">
-              {/* 顶部工具栏：分页 + 搜索 */}
+              {/* 顶部标签切换：当前会话 / 所有历史 */}
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={() => setShowSessionHistory(true)}
+                    className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
+                      showSessionHistory 
+                        ? 'bg-blue-100 text-blue-600' 
+                        : (isDarkTheme ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-500')
+                    }`}
+                  >
+                    当前会话 ({history.length})
+                  </button>
+                  <button
+                    onClick={() => { setShowSessionHistory(false); setSelectedDate(''); }}
+                    className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
+                      !showSessionHistory && !selectedDate
+                        ? 'bg-blue-100 text-blue-600' 
+                        : (isDarkTheme ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-500')
+                    }`}
+                  >
+                    所有历史 ({persistedHistory.length})
+                  </button>
+                  
+                  {/* 日期选择器 */}
+                  {!showSessionHistory && availableDates.length > 0 && (
+                    <select
+                      value={selectedDate}
+                      onChange={(e) => {
+                        setSelectedDate(e.target.value);
+                        loadHistory(e.target.value || undefined);
+                        setHistoryPage(1);
+                      }}
+                      className={`px-2 py-1.5 text-xs rounded-lg border focus:outline-none focus:ring-1 focus:ring-blue-500 ${
+                        isDarkTheme 
+                          ? 'bg-gray-700 border-gray-600 text-white' 
+                          : 'bg-white border-gray-200 text-gray-700'
+                      }`}
+                    >
+                      <option value="">全部日期</option>
+                      {availableDates.map(date => (
+                        <option key={date} value={date}>{date}</option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+                
+                {/* 操作按钮 */}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => loadHistory(selectedDate || undefined)}
+                    disabled={historyLoading}
+                    className={`p-1.5 rounded transition-colors ${isDarkTheme ? 'hover:bg-gray-700' : 'hover:bg-gray-100'} ${iconColor}`}
+                    title="刷新历史"
+                  >
+                    <svg className={`w-4 h-4 ${historyLoading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={clearPersistedHistory}
+                    disabled={historySaving || persistedHistory.length === 0}
+                    className={`p-1.5 rounded transition-colors ${isDarkTheme ? 'hover:bg-gray-700' : 'hover:bg-gray-100'} ${persistedHistory.length === 0 ? 'opacity-30 cursor-not-allowed' : ''} text-red-500`}
+                    title="清空所有历史"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+
+              {/* 工具栏：分页 + 搜索 */}
               <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
                 {/* 分页控制 */}
                 <div className="flex items-center gap-2">
@@ -504,20 +790,17 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
                     </svg>
                   </button>
                   <span className={`text-xs ${isDarkTheme ? 'text-gray-400' : 'text-gray-500'}`}>
-                    {historyPage}/{Math.max(1, Math.ceil(filteredHistory.length / historyPageSize))}
+                    {historyPage}/{Math.max(1, Math.ceil(displayedHistory.length / historyPageSize))}
                   </span>
                   <button
-                    onClick={() => setHistoryPage(p => Math.min(Math.ceil(filteredHistory.length / historyPageSize), p + 1))}
-                    disabled={historyPage >= Math.ceil(filteredHistory.length / historyPageSize)}
-                    className={`p-1 rounded ${historyPage >= Math.ceil(filteredHistory.length / historyPageSize) ? 'opacity-30 cursor-not-allowed' : 'hover:bg-gray-100'} ${iconColor}`}
+                    onClick={() => setHistoryPage(p => Math.min(Math.ceil(displayedHistory.length / historyPageSize), p + 1))}
+                    disabled={historyPage >= Math.ceil(displayedHistory.length / historyPageSize)}
+                    className={`p-1 rounded ${historyPage >= Math.ceil(displayedHistory.length / historyPageSize) ? 'opacity-30 cursor-not-allowed' : 'hover:bg-gray-100'} ${iconColor}`}
                   >
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                     </svg>
                   </button>
-                  <span className={`text-xs ${isDarkTheme ? 'text-gray-400' : 'text-gray-500'}`}>
-                    {historyPageSize}/page
-                  </span>
                 </div>
 
                 {/* 搜索框 */}
@@ -526,37 +809,38 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
                     type="text"
                     value={historySearch}
                     onChange={(e) => { setHistorySearch(e.target.value); setHistoryPage(1); }}
-                    placeholder="Search"
+                    placeholder="搜索..."
                     className={`px-2 py-1 text-xs rounded border focus:outline-none focus:ring-1 focus:ring-blue-500 w-32 ${
                       isDarkTheme 
                         ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-500' 
                         : 'bg-white border-gray-200 text-gray-900 placeholder-gray-400'
                     }`}
                   />
-                  <svg className={`w-4 h-4 ${iconColor}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                  </svg>
                 </div>
               </div>
 
               {/* 表头 */}
               <div className={`grid grid-cols-12 gap-2 py-2 border-b text-xs font-medium ${isDarkTheme ? 'border-gray-700 text-gray-400' : 'border-gray-200 text-gray-500'}`}>
-                <div className="col-span-2">Time</div>
-                <div className="col-span-4">Caption</div>
-                <div className="col-span-4">Translated</div>
+                <div className="col-span-2">时间</div>
+                <div className="col-span-4">原文</div>
+                <div className="col-span-4">译文</div>
                 <div className="col-span-2 text-right">API</div>
               </div>
 
               {/* 历史记录列表 */}
-              {filteredHistory.length === 0 ? (
+              {historyLoading ? (
+                <p className={`text-sm text-center py-8 ${isDarkTheme ? 'text-gray-500' : 'text-gray-400'}`}>
+                  加载中...
+                </p>
+              ) : displayedHistory.length === 0 ? (
                 <p className={`text-sm text-center py-8 ${isDarkTheme ? 'text-gray-500' : 'text-gray-400'}`}>
                   暂无历史记录
                 </p>
               ) : (
                 <div className="max-h-[250px] overflow-auto">
-                  {paginatedHistory.map((item, index) => (
+                  {paginatedDisplayedHistory.map((item, index) => (
                     <div 
-                      key={index} 
+                      key={item.id || index} 
                       className={`grid grid-cols-12 gap-2 py-2 text-xs border-b ${isDarkTheme ? 'border-gray-800' : 'border-gray-100'} hover:${isDarkTheme ? 'bg-gray-800' : 'bg-gray-50'}`}
                     >
                       <div className={`col-span-2 ${isDarkTheme ? 'text-gray-400' : 'text-gray-500'}`}>

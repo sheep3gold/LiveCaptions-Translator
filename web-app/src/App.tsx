@@ -51,7 +51,7 @@ function App() {
   
   // 语言设置
   const [sourceLanguage, setSourceLanguage] = useState('en-US');
-  const [targetLanguage, setTargetLanguage] = useState('zh-CN');
+  const [targetLanguage, setTargetLanguage] = useState('en-US'); // 默认翻译成英文
   
   // API 设置
   const [apiType, setApiType] = useState<TranslationAPI>('google');

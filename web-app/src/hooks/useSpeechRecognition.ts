@@ -105,10 +105,15 @@ export function useSpeechRecognition(config: SpeechRecognitionConfig): UseSpeech
 
       if (final) {
         console.log('[SpeechRecognition] Final:', final);
-        setFinalTranscript(prev => prev + final);
-        setTranscript(prev => prev + final);
+        // 不再累积，每次只显示当前句子
+        setFinalTranscript(final);
+        setTranscript(final);
+        // 清空 interim，避免显示重复内容
+        setInterimTranscript('');
+      } else {
+        // 只有在没有 final 结果时才更新 interim
+        setInterimTranscript(interim);
       }
-      setInterimTranscript(interim);
     };
 
     recognition.onerror = (event: Event & { error?: string }) => {
