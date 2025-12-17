@@ -42,7 +42,7 @@ export function FloatingWindow({ onClose, onOpenFull }: FloatingWindowProps) {
   
   // 引用
   const lastTranslatedTextRef = useRef('');
-  const translationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const translationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 语音识别
   const {

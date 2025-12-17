@@ -61,7 +61,7 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
   const [showSessionHistory, setShowSessionHistory] = useState(false); // 显示当前会话记录
   
   const lastTranslatedTextRef = useRef('');
-  const translationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const translationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTogglingRef = useRef(false); // 防止快速双击
 
   const {

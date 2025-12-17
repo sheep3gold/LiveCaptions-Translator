@@ -67,7 +67,7 @@ function App() {
   
   // 引用
   const lastTranslatedTextRef = useRef('');
-  const translationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const translationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 监听 hash 变化
   useEffect(() => {
@@ -228,31 +228,19 @@ function App() {
           <div className="glass rounded-2xl p-1 flex flex-wrap justify-center gap-1">
             <button
               onClick={() => changeViewMode('full')}
-              className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
-                viewMode === 'full'
-                  ? 'bg-gradient-to-r from-indigo-500 to-purple-500 text-white'
-                  : 'text-gray-400 hover:text-white'
-              }`}
+              className="px-4 py-2 rounded-xl text-sm font-medium transition-all bg-gradient-to-r from-indigo-500 to-purple-500 text-white"
             >
               🖥️ 完整界面
             </button>
             <button
               onClick={() => changeViewMode('floating')}
-              className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
-                viewMode === 'floating'
-                  ? 'bg-gradient-to-r from-indigo-500 to-purple-500 text-white'
-                  : 'text-gray-400 hover:text-white'
-              }`}
+              className="px-4 py-2 rounded-xl text-sm font-medium transition-all text-gray-400 hover:text-white"
             >
               🪟 悬浮窗口
             </button>
             <button
               onClick={() => changeViewMode('meeting')}
-              className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
-                viewMode === 'meeting'
-                  ? 'bg-gradient-to-r from-indigo-500 to-purple-500 text-white'
-                  : 'text-gray-400 hover:text-white'
-              }`}
+              className="px-4 py-2 rounded-xl text-sm font-medium transition-all text-gray-400 hover:text-white"
             >
               🤖 翻译 + AI 助手
             </button>

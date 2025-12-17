@@ -35,7 +35,7 @@ export function CompactTranslator({ onContextChange, onHistoryChange }: CompactT
   const [history, setHistory] = useState<TranslationEntry[]>([]);
   
   const lastTranslatedTextRef = useRef('');
-  const translationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const translationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const {
     isListening,
