@@ -35,6 +35,31 @@ export function FloatingWindow({ onClose, onOpenFull }: FloatingWindowProps) {
   const [activeTab, setActiveTab] = useState<'home' | 'history' | 'log'>('home');
   const [history, setHistory] = useState<Array<{ source: string; translated: string; time: Date }>>([]);
   
+  // 从 localStorage 读取设置
+  const [maxSentences, setMaxSentences] = useState(2); // 悬浮窗显示句数
+  
+  // 监听 localStorage 设置变化
+  useEffect(() => {
+    const loadSettings = () => {
+      try {
+        const settings = localStorage.getItem('translator_settings');
+        if (settings) {
+          const parsed = JSON.parse(settings);
+          if (parsed.floatingWindowSentences) {
+            setMaxSentences(parsed.floatingWindowSentences);
+          }
+        }
+      } catch (e) {
+        console.error('[FloatingWindow] Failed to load settings:', e);
+      }
+    };
+    
+    loadSettings();
+    // 监听 storage 事件，实时同步设置
+    window.addEventListener('storage', loadSettings);
+    return () => window.removeEventListener('storage', loadSettings);
+  }, []);
+  
   // 拖拽相关
   const [position, setPosition] = useState({ x: 100, y: 100 });
   const [isDragging, setIsDragging] = useState(false);
@@ -363,11 +388,11 @@ export function FloatingWindow({ onClose, onOpenFull }: FloatingWindowProps) {
 
           {activeTab === 'history' && (
             <div className="space-y-2 max-h-[200px] overflow-y-auto">
-              <div className="text-xs font-medium text-gray-500 mb-2">翻译历史</div>
+              <div className="text-xs font-medium text-gray-500 mb-2">翻译历史 (显示{maxSentences}句)</div>
               {history.length === 0 ? (
                 <p className="text-sm text-gray-400 text-center py-4">暂无历史记录</p>
               ) : (
-                history.map((item, index) => (
+                history.slice(0, maxSentences).map((item, index) => (
                   <div key={index} className={`p-2 rounded-lg ${isDarkMode ? 'bg-gray-800' : 'bg-gray-50'} text-xs`}>
                     <p className="text-gray-500 truncate">{item.source}</p>
                     <p className={isDarkMode ? 'text-gray-200' : 'text-gray-700'}>{item.translated}</p>

@@ -211,3 +211,15 @@ After configuration, close Windows LiveCaptions and launch LiveCaptions Translat
 ### Star History
 
 [![Stargazers over time](https://starchart.cc/SakiRinn/LiveCaptions-Translator.svg?variant=adaptive)](https://starchart.cc/SakiRinn/LiveCaptions-Translator)
+
+cd web-app
+
+# 安装依赖
+npm install
+
+# 启动开发服务器（前端 + 后端同时启动）
+npm run dev:all
+
+# 或者分别启动：
+# 仅前端: npm run dev
+# 仅后端: npm run dev:server

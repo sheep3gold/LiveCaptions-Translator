@@ -363,3 +363,9 @@ MigrationBackup/
 FodyWeavers.xsd
 
 .idea/
+
+# Web app
+web-app/node_modules/
+web-app/dist/
+web-app/data/
+web-app/data/history/

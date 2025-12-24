@@ -8,6 +8,9 @@ interface TranslationConfig {
   apiKey?: string;
   apiUrl?: string;
   model?: string;
+  contextAware?: boolean; // 是否启用上下文感知
+  contextRounds?: number; // 上下文轮次
+  contextHistory?: Array<{ source: string; translated: string }>; // 历史翻译记录
 }
 
 interface UseTranslationReturn {
@@ -52,6 +55,29 @@ export function useTranslation(config: TranslationConfig): UseTranslationReturn 
     };
     const targetLang = languageMap[config.targetLanguage] || config.targetLanguage;
 
+    // 构建消息列表
+    const messages: Array<{ role: string; content: string }> = [
+      {
+        role: 'system',
+        content: `You are a professional translator. Translate the following text to ${targetLang}. Only output the translation, no explanations.`
+      }
+    ];
+
+    // 如果启用了上下文感知，添加历史记录作为上下文
+    if (config.contextAware && config.contextHistory && config.contextHistory.length > 0) {
+      const rounds = config.contextRounds || 2;
+      const recentHistory = config.contextHistory.slice(0, rounds);
+      
+      // 添加历史记录作为上下文（从旧到新）
+      recentHistory.reverse().forEach(entry => {
+        messages.push({ role: 'user', content: entry.source });
+        messages.push({ role: 'assistant', content: entry.translated });
+      });
+    }
+
+    // 添加当前要翻译的文本
+    messages.push({ role: 'user', content: text });
+
     const response = await fetch(config.apiUrl, {
       method: 'POST',
       headers: {
@@ -60,16 +86,7 @@ export function useTranslation(config: TranslationConfig): UseTranslationReturn 
       },
       body: JSON.stringify({
         model: config.model || 'gpt-3.5-turbo',
-        messages: [
-          {
-            role: 'system',
-            content: `You are a professional translator. Translate the following text to ${targetLang}. Only output the translation, no explanations.`
-          },
-          {
-            role: 'user',
-            content: text
-          }
-        ],
+        messages,
         temperature: 0.3,
       }),
       signal,

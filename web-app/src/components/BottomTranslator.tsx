@@ -49,7 +49,7 @@ const TRANSLATION_APIS: { code: TranslationAPI; name: string }[] = [
 
 export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTranslatorProps) {
   const [sourceLanguage, setSourceLanguage] = useState('zh-CN'); // 默认简体中文，可在设置中改为自动识别
-  const [targetLanguage, setTargetLanguage] = useState('en-US'); // 默认翻译成英文
+  const [targetLanguage, setTargetLanguage] = useState('zh-CN'); // 默认翻译成中文简体
   const [apiType, setApiType] = useState<TranslationAPI>('google');
   const [activeTab, setActiveTab] = useState<'home' | 'history' | 'settings'>('home');
   const [history, setHistory] = useState<TranslationEntry[]>([]);
@@ -59,6 +59,14 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historySaving, setHistorySaving] = useState(false);
   const [isTranslationPaused, setIsTranslationPaused] = useState(false); // 暂停翻译（但继续语音识别）
+  
+  // 新增设置状态
+  const [showLiveCaptions, setShowLiveCaptions] = useState<'show' | 'hide'>('show'); // 实时字幕显示
+  const [contextRounds, setContextRounds] = useState(2); // 上下文轮次
+  const [contextAware, setContextAware] = useState(true); // 上下文感知
+  const [apiInterval, setApiInterval] = useState(50); // API间隔（百分比）
+  const [showDelay, setShowDelay] = useState(true); // 显示延迟
+  const [floatingWindowSentences, setFloatingWindowSentences] = useState(2); // 悬浮窗显示句数
   
   // 历史记录相关状态
   const [historyPage, setHistoryPage] = useState(1);
@@ -72,6 +80,10 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
   const translationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTogglingRef = useRef(false); // 防止快速双击
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const displayDelayTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null); // 显示延迟定时器
+  
+  // 显示延迟功能：用于存储延迟显示的翻译结果
+  const [delayedTranslatedText, setDelayedTranslatedText] = useState('');
   
   // 使用 ref 跟踪上一个 transcript 和对应的翻译
   const prevTranscriptRef = useRef('');
@@ -148,6 +160,18 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
     loadHistory();
   }, [loadHistory]);
 
+  // 同步设置到 localStorage，供 FloatingWindow 读取
+  useEffect(() => {
+    localStorage.setItem('translator_settings', JSON.stringify({
+      floatingWindowSentences,
+      showLiveCaptions,
+      contextAware,
+      contextRounds,
+      apiInterval,
+      showDelay,
+    }));
+  }, [floatingWindowSentences, showLiveCaptions, contextAware, contextRounds, apiInterval, showDelay]);
+
   const {
     isListening,
     transcript,
@@ -191,6 +215,9 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
     apiType,
     targetLanguage,
     apiKey: apiKey || undefined,
+    contextAware, // 上下文感知开关
+    contextRounds, // 上下文轮次
+    contextHistory: history.map(h => ({ source: h.source, translated: h.translated })), // 历史翻译记录
   });
 
   useEffect(() => {
@@ -209,14 +236,14 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
     translationTimeoutRef.current = setTimeout(() => {
       lastTranslatedTextRef.current = textToTranslate;
       translate(textToTranslate);
-    }, 300);
+    }, 100 + apiInterval * 9); // API间隔: 0%=100ms, 50%=550ms, 100%=1000ms
     
     return () => {
       if (translationTimeoutRef.current) {
         clearTimeout(translationTimeoutRef.current);
       }
     };
-  }, [transcript, interimTranscript, translate, isTranslationPaused]);
+  }, [transcript, interimTranscript, translate, isTranslationPaused, apiInterval]);
 
   // 当 transcript 变化时，检测是否是新的一句话
   useEffect(() => {
@@ -268,6 +295,40 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
       onContextChange?.(contextText);
     }
   }, [transcript, translatedText, isTranslating, isTranslationPaused, apiType, onContextChange]);
+
+  // 显示延迟功能：当启用时，翻译结果延迟300ms显示，避免频繁闪烁
+  useEffect(() => {
+    if (!showDelay) {
+      // 未启用延迟，直接显示
+      setDelayedTranslatedText(translatedText);
+      return;
+    }
+    
+    // 启用延迟，等待翻译完成后再显示
+    if (displayDelayTimeoutRef.current) {
+      clearTimeout(displayDelayTimeoutRef.current);
+    }
+    
+    if (translatedText && !isTranslating) {
+      // 翻译完成后，延迟300ms显示
+      displayDelayTimeoutRef.current = setTimeout(() => {
+        setDelayedTranslatedText(translatedText);
+      }, 300);
+    } else if (isTranslating) {
+      // 正在翻译时，保持上一次的结果
+    } else {
+      setDelayedTranslatedText(translatedText);
+    }
+    
+    return () => {
+      if (displayDelayTimeoutRef.current) {
+        clearTimeout(displayDelayTimeoutRef.current);
+      }
+    };
+  }, [translatedText, isTranslating, showDelay]);
+
+  // 计算实际显示的翻译文本
+  const displayTranslatedText = showDelay ? delayedTranslatedText : translatedText;
 
   const handleToggleListening = useCallback(() => {
     // 防止快速双击
@@ -585,7 +646,7 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
                       >
                         {isTranslationPaused 
                           ? '⏸ 翻译已暂停' 
-                          : (translatedText || (isTranslating ? '翻译中...' : ''))}
+                          : (displayTranslatedText || (isTranslating ? '翻译中...' : ''))}
                       </p>
                     </div>
                   )}
@@ -654,7 +715,8 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
                   </div>
                 )}
 
-                {/* 原文区域 - 上方，小字体，Regular，60%透明度 */}
+                {/* 原文区域 - 上方，小字体，Regular，60%透明度 - 受「实时字幕」设置控制 */}
+                {showLiveCaptions === 'show' && (
                 <div className="mb-4">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className={`text-xs font-medium px-2 py-0.5 rounded ${isDarkTheme ? 'bg-blue-900 text-blue-200' : 'bg-blue-100 text-blue-600'}`}>
@@ -680,6 +742,7 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
                     </span>
                   </div>
                 </div>
+                )}
 
                 {/* 译文区域 - 下方，大字体，Medium，90%透明度 */}
                 <div>
@@ -694,7 +757,7 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
                   >
                     {isTranslationPaused 
                       ? '⏸ 翻译已暂停（原文继续识别中...）' 
-                      : (translatedText || (isTranslating ? '翻译中...' : '翻译结果将显示在这里'))}
+                      : (displayTranslatedText || (isTranslating ? '翻译中...' : '翻译结果将显示在这里'))}
                   </p>
                 </div>
               </div>
@@ -871,109 +934,271 @@ export function BottomTranslator({ onContextChange, onHistoryChange }: BottomTra
           )}
 
           {activeTab === 'settings' && (
-            <div className="p-4 space-y-4">
-              <h3 className={`text-sm font-semibold ${isDarkTheme ? 'text-white' : 'text-gray-800'}`}>
-                翻译设置
-              </h3>
-              
-              {/* 源语言（语音识别语言） */}
-              <div>
-                <label className={`block text-xs mb-1.5 ${isDarkTheme ? 'text-gray-400' : 'text-gray-500'}`}>
-                  源语言（说话语言）
-                </label>
-                <select
-                  value={sourceLanguage}
-                  onChange={(e) => setSourceLanguage(e.target.value)}
-                  className={`w-full px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                    isDarkTheme 
-                      ? 'bg-gray-700 border-gray-600 text-white' 
-                      : 'bg-white border-gray-200 text-gray-900'
-                  } border`}
-                >
-                  {SOURCE_LANGUAGES.map(lang => (
-                    <option key={lang.code} value={lang.code}>{lang.name}</option>
-                  ))}
-                </select>
-              </div>
+            <div className="px-4 pb-4">
+              {/* 设置面板 - 网格布局，匹配设计图，与主页高度一致 */}
+              <div 
+                className={contentBg}
+                style={{ 
+                  borderRadius: '12px',
+                  padding: '12px 16px',
+                  minHeight: '152px',
+                  border: isDarkTheme ? '1px solid rgba(255,255,255,0.1)' : '1px solid rgba(0,0,0,0.1)'
+                }}
+              >
+                {/* 第一行：实时字幕、翻译引擎、上下文轮次、上下文感知、API间隔 */}
+                <div className="grid grid-cols-5 gap-3 mb-3">
+                  {/* 实时字幕 */}
+                  <div>
+                    <label className={`block text-xs font-medium mb-1 ${isDarkTheme ? 'text-gray-300' : 'text-gray-700'}`}>
+                      实时字幕
+                    </label>
+                    <div className="relative">
+                      <select
+                        value={showLiveCaptions}
+                        onChange={(e) => setShowLiveCaptions(e.target.value as 'show' | 'hide')}
+                        className={`w-full px-2 py-1.5 rounded-lg text-xs appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                          isDarkTheme 
+                            ? 'bg-gray-800 border-blue-500 text-white' 
+                            : 'bg-white border-blue-400 text-gray-800'
+                        } border`}
+                      >
+                        <option value="show">显示</option>
+                        <option value="hide">隐藏</option>
+                      </select>
+                      <svg className={`absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none ${isDarkTheme ? 'text-gray-400' : 'text-blue-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                      </svg>
+                    </div>
+                  </div>
 
-              {/* 目标语言 */}
-              <div>
-                <label className={`block text-xs mb-1.5 ${isDarkTheme ? 'text-gray-400' : 'text-gray-500'}`}>
-                  目标语言（翻译成）
-                </label>
-                <select
-                  value={targetLanguage}
-                  onChange={(e) => setTargetLanguage(e.target.value)}
-                  className={`w-full px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                    isDarkTheme 
-                      ? 'bg-gray-700 border-gray-600 text-white' 
-                      : 'bg-white border-gray-200 text-gray-900'
-                  } border`}
-                >
-                  {TARGET_LANGUAGES.map(lang => (
-                    <option key={lang.code} value={lang.code}>{lang.name}</option>
-                  ))}
-                </select>
-              </div>
+                  {/* 翻译引擎 */}
+                  <div>
+                    <label className={`block text-xs font-medium mb-1 ${isDarkTheme ? 'text-gray-300' : 'text-gray-700'}`}>
+                      翻译引擎
+                    </label>
+                    <div className="relative">
+                      <select
+                        value={apiType}
+                        onChange={(e) => setApiType(e.target.value as TranslationAPI)}
+                        className={`w-full px-2 py-1.5 rounded-lg text-xs appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                          isDarkTheme 
+                            ? 'bg-gray-800 border-blue-500 text-white' 
+                            : 'bg-white border-blue-400 text-gray-800'
+                        } border`}
+                      >
+                        {TRANSLATION_APIS.map(api => (
+                          <option key={api.code} value={api.code}>{api.name}</option>
+                        ))}
+                      </select>
+                      <svg className={`absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none ${isDarkTheme ? 'text-gray-400' : 'text-blue-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                      </svg>
+                    </div>
+                  </div>
 
-              {/* 翻译引擎 */}
-              <div>
-                <label className={`block text-xs mb-1.5 ${isDarkTheme ? 'text-gray-400' : 'text-gray-500'}`}>
-                  翻译引擎
-                </label>
-                <select
-                  value={apiType}
-                  onChange={(e) => setApiType(e.target.value as TranslationAPI)}
-                  className={`w-full px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                    isDarkTheme 
-                      ? 'bg-gray-700 border-gray-600 text-white' 
-                      : 'bg-white border-gray-200 text-gray-900'
-                  } border`}
-                >
-                  {TRANSLATION_APIS.map(api => (
-                    <option key={api.code} value={api.code}>{api.name}</option>
-                  ))}
-                </select>
-              </div>
+                  {/* 上下文轮次 */}
+                  <div>
+                    <label className={`block text-xs font-medium mb-1 ${isDarkTheme ? 'text-gray-300' : 'text-gray-700'}`}>
+                      上下文轮次
+                    </label>
+                    <div className="relative">
+                      <select
+                        value={contextRounds}
+                        onChange={(e) => setContextRounds(parseInt(e.target.value))}
+                        className={`w-full px-2 py-1.5 rounded-lg text-xs appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                          isDarkTheme 
+                            ? 'bg-gray-800 border-blue-500 text-white' 
+                            : 'bg-white border-blue-400 text-gray-800'
+                        } border`}
+                      >
+                        {[1, 2, 3, 4, 5].map(n => (
+                          <option key={n} value={n}>{n}</option>
+                        ))}
+                      </select>
+                      <svg className={`absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none ${isDarkTheme ? 'text-gray-400' : 'text-blue-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                      </svg>
+                    </div>
+                  </div>
 
-              {/* API Key */}
-              {(apiType === 'openai' || apiType === 'deepl') && (
-                <div>
-                  <label className={`block text-xs mb-1.5 ${isDarkTheme ? 'text-gray-400' : 'text-gray-500'}`}>
-                    API Key
-                  </label>
-                  <input
-                    type="password"
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    placeholder={apiType === 'openai' ? 'sk-...' : 'DeepL API Key'}
-                    className={`w-full px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                      isDarkTheme 
-                        ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-500' 
-                        : 'bg-white border-gray-200 text-gray-900 placeholder-gray-400'
-                    } border`}
-                  />
+                  {/* 上下文感知 */}
+                  <div>
+                    <label className={`block text-xs font-medium mb-1 ${isDarkTheme ? 'text-gray-300' : 'text-gray-700'}`}>
+                      上下文感知
+                    </label>
+                    <button
+                      onClick={() => setContextAware(!contextAware)}
+                      className={`relative w-10 h-5 rounded-full transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-offset-1 ${
+                        contextAware ? 'bg-blue-500' : (isDarkTheme ? 'bg-gray-600' : 'bg-gray-300')
+                      }`}
+                    >
+                      <span
+                        className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${
+                          contextAware ? 'translate-x-5' : 'translate-x-0'
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  {/* API间隔 */}
+                  <div>
+                    <label className={`block text-xs font-medium mb-1 ${isDarkTheme ? 'text-gray-300' : 'text-gray-700'}`}>
+                      API间隔
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={apiInterval}
+                        onChange={(e) => setApiInterval(parseInt(e.target.value))}
+                        className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer"
+                        style={{
+                          background: `linear-gradient(to right, #3b82f6 0%, #3b82f6 ${apiInterval}%, ${isDarkTheme ? '#4b5563' : '#d1d5db'} ${apiInterval}%, ${isDarkTheme ? '#4b5563' : '#d1d5db'} 100%)`
+                        }}
+                      />
+                      <span className={`text-xs px-1.5 py-0.5 rounded bg-blue-500 text-white min-w-[36px] text-center`}>
+                        {apiInterval}%
+                      </span>
+                    </div>
+                  </div>
                 </div>
-              )}
 
-              {/* 状态信息 */}
-              <div className={`p-3 rounded-lg text-xs space-y-1 ${contentBg}`}>
-                <p className={isDarkTheme ? 'text-gray-400' : 'text-gray-500'}>
-                  <span className={`inline-block w-2 h-2 rounded-full mr-2 ${isSupported ? 'bg-green-500' : 'bg-red-500'}`} />
-                  Web Speech API: {isSupported ? '已支持' : '不支持'}
-                </p>
-                <p className={isDarkTheme ? 'text-gray-400' : 'text-gray-500'}>
-                  <span className={`inline-block w-2 h-2 rounded-full mr-2 ${isListening ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
-                  状态: {isListening ? '识别中' : '已停止'}
-                </p>
-                <p className={isDarkTheme ? 'text-gray-400' : 'text-gray-500'}>
-                  源语言: {SOURCE_LANGUAGES.find(l => l.code === sourceLanguage)?.name || sourceLanguage}
-                </p>
-                {speechError && (
-                  <p className="text-red-500">
-                    错误: {speechError}
-                  </p>
-                )}
+                {/* 第二行：目标语言、显示延迟、悬浮窗显示句数、源语言 */}
+                <div className="grid grid-cols-5 gap-3">
+                  {/* 目标语言 */}
+                  <div>
+                    <label className={`block text-xs font-medium mb-1 ${isDarkTheme ? 'text-gray-300' : 'text-gray-700'}`}>
+                      目标语言
+                    </label>
+                    <div className="relative">
+                      <select
+                        value={targetLanguage}
+                        onChange={(e) => setTargetLanguage(e.target.value)}
+                        className={`w-full px-2 py-1.5 rounded-lg text-xs appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                          isDarkTheme 
+                            ? 'bg-gray-800 border-blue-500 text-white' 
+                            : 'bg-white border-blue-400 text-gray-800'
+                        } border`}
+                      >
+                        {TARGET_LANGUAGES.map(lang => (
+                          <option key={lang.code} value={lang.code}>{lang.name}</option>
+                        ))}
+                      </select>
+                      <svg className={`absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none ${isDarkTheme ? 'text-gray-400' : 'text-blue-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                      </svg>
+                    </div>
+                  </div>
+
+                  {/* 显示延迟 */}
+                  <div>
+                    <label className={`block text-xs font-medium mb-1 ${isDarkTheme ? 'text-gray-300' : 'text-gray-700'}`}>
+                      显示延迟
+                    </label>
+                    <button
+                      onClick={() => setShowDelay(!showDelay)}
+                      className={`relative w-10 h-5 rounded-full transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-offset-1 ${
+                        showDelay ? 'bg-blue-500' : (isDarkTheme ? 'bg-gray-600' : 'bg-gray-300')
+                      }`}
+                    >
+                      <span
+                        className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ${
+                          showDelay ? 'translate-x-5' : 'translate-x-0'
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  {/* 悬浮窗显示句数 */}
+                  <div>
+                    <label className={`block text-xs font-medium mb-1 ${isDarkTheme ? 'text-gray-300' : 'text-gray-700'}`}>
+                      悬浮窗显示句数
+                    </label>
+                    <div className="relative">
+                      <select
+                        value={floatingWindowSentences}
+                        onChange={(e) => setFloatingWindowSentences(parseInt(e.target.value))}
+                        className={`w-full px-2 py-1.5 rounded-lg text-xs appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                          isDarkTheme 
+                            ? 'bg-gray-800 border-blue-500 text-white' 
+                            : 'bg-white border-blue-400 text-gray-800'
+                        } border`}
+                      >
+                        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                          <option key={n} value={n}>{n}</option>
+                        ))}
+                      </select>
+                      <svg className={`absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none ${isDarkTheme ? 'text-gray-400' : 'text-blue-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                      </svg>
+                    </div>
+                  </div>
+
+                  {/* 源语言 */}
+                  <div>
+                    <label className={`block text-xs font-medium mb-1 ${isDarkTheme ? 'text-gray-300' : 'text-gray-700'}`}>
+                      源语言
+                    </label>
+                    <div className="relative">
+                      <select
+                        value={sourceLanguage}
+                        onChange={(e) => setSourceLanguage(e.target.value)}
+                        className={`w-full px-2 py-1.5 rounded-lg text-xs appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                          isDarkTheme 
+                            ? 'bg-gray-800 border-blue-500 text-white' 
+                            : 'bg-white border-blue-400 text-gray-800'
+                        } border`}
+                      >
+                        {SOURCE_LANGUAGES.map(lang => (
+                          <option key={lang.code} value={lang.code}>{lang.name}</option>
+                        ))}
+                      </select>
+                      <svg className={`absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none ${isDarkTheme ? 'text-gray-400' : 'text-blue-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                      </svg>
+                    </div>
+                  </div>
+
+                  {/* API Key (条件显示) */}
+                  {(apiType === 'openai' || apiType === 'deepl') && (
+                    <div>
+                      <label className={`block text-xs font-medium mb-1 ${isDarkTheme ? 'text-gray-300' : 'text-gray-700'}`}>
+                        API Key
+                      </label>
+                      <input
+                        type="password"
+                        value={apiKey}
+                        onChange={(e) => setApiKey(e.target.value)}
+                        placeholder={apiType === 'openai' ? 'sk-...' : 'Key'}
+                        className={`w-full px-2 py-1.5 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-400 ${
+                          isDarkTheme 
+                            ? 'bg-gray-800 border-blue-500 text-white placeholder-gray-500' 
+                            : 'bg-white border-blue-400 text-gray-800 placeholder-gray-400'
+                        } border`}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {/* 状态信息栏 */}
+                <div className={`mt-3 pt-2 border-t ${isDarkTheme ? 'border-gray-700' : 'border-gray-200'}`}>
+                  <div className="flex items-center gap-4 text-xs">
+                    <span className={isDarkTheme ? 'text-gray-400' : 'text-gray-500'}>
+                      <span className={`inline-block w-2 h-2 rounded-full mr-1.5 ${isSupported ? 'bg-green-500' : 'bg-red-500'}`} />
+                      Web Speech: {isSupported ? '已支持' : '不支持'}
+                    </span>
+                    <span className={isDarkTheme ? 'text-gray-400' : 'text-gray-500'}>
+                      <span className={`inline-block w-2 h-2 rounded-full mr-1.5 ${isListening ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`} />
+                      {isListening ? '识别中' : '已停止'}
+                    </span>
+                    {speechError && (
+                      <span className="text-red-500">
+                        错误: {speechError}
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
           )}
